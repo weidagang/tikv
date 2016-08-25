@@ -158,6 +158,8 @@ pub struct Peer {
     // if we remove ourself in ChangePeer remove, we should set this flag, then
     // any following committed logs in same Ready should be applied failed.
     pending_remove: bool,
+    pub leader_missing: bool,
+    pub leader_missing_time: Instant,
 
     pub tag: String,
 }
@@ -241,6 +243,8 @@ impl Peer {
             coprocessor_host: CoprocessorHost::new(),
             size_diff_hint: 0,
             pending_remove: false,
+            leader_missing: false,
+            leader_missing_time: Instant::now(),
             tag: tag,
         };
 
@@ -445,11 +449,31 @@ impl Peer {
             ready.hs.take();
         }
 
+        if let Some(ref soft_state) = ready.ss {
+            if soft_state.leader_id == raft::INVALID_ID {
+                if !self.leader_missing {
+                    self.leader_missing_time = Instant::now();
+                    self.leader_missing = true
+                }
+            } else {
+                if self.leader_missing {
+                    self.leader_missing = false
+                }
+            }
+        }
+
         self.raft_group.advance(ready);
         Ok(Some(ReadyResult {
             apply_snap_result: apply_result,
             exec_results: exec_results,
         }))
+    }
+    pub fn since_leader_missing(&self) -> Duration {
+        if self.leader_missing {
+            self.leader_missing_time.elapsed()
+        } else {
+            Duration::new(0, 0)
+        }
     }
 
     pub fn propose(&mut self,

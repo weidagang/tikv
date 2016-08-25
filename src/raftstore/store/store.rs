@@ -558,6 +558,34 @@ impl<T: Transport, C: PdClient> Store<T, C> {
                     return Err(e);
                 }
             }
+
+            // If this peer detect the leader is missing for a long long time,
+            // it's reasonable to take it as a stale peer which is removed from
+            // the original cluster.
+            // This most likely happens in scienario as:
+            // At first, there are three node A, B, C in the cluster, and A is leader.
+            // Node B gets down. And then A and D, E, F into the cluster.
+            // Node D become leader of the new cluster, and then remove node A, B, C.
+            // After all these node in and out, now the cluster has node D, E, F.
+            // If node B goes up at this moment, it still think it is one of the cluster
+            // and has peers A, C. However, it couldnot reach A, C since they are removed
+            // from the cluster or probably destroyed.
+            // Meamtime, D, E, F would not reach B, since it's not in the cluster anymore.
+            // In this case, Node B would notice that the leader is missing for a long long
+            // time, and it would check with pd to confirm whether it's still a member of
+            // the cluster. If not, destroy itself as a stale peer which is removed out already.
+            if let Some(peer) = self.region_peers.get_mut(&region_id) {
+                let duration = peer.since_leader_missing();
+                if duration >= self.cfg.max_leader_missing_duration {
+                    let task = PdTask::GetRegion {
+                        peer: peer.peer.clone(),
+                        region: peer.region().clone(),
+                    };
+                    if let Err(e) = self.pd_worker.schedule(task) {
+                        error!("{} failed to notify pd: {}", peer.tag, e)
+                    }
+                }
+            }
         }
 
         slow_log!(t, "on {} regions raft ready", pending_count);

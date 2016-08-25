@@ -19,6 +19,7 @@ use uuid::Uuid;
 use kvproto::metapb;
 use kvproto::eraftpb::ConfChangeType;
 use kvproto::raft_cmdpb::{RaftCmdRequest, RaftCmdResponse, AdminRequest, AdminCmdType};
+use kvproto::raft_serverpb::RaftMessage;
 use kvproto::pdpb;
 
 use util::worker::Runnable;
@@ -47,6 +48,10 @@ pub enum Task {
         left: metapb::Region,
         right: metapb::Region,
     },
+    GetRegion {
+        region: metapb::Region,
+        peer: metapb::Peer,
+    },
 }
 
 
@@ -68,6 +73,9 @@ impl Display for Task {
             Task::StoreHeartbeat { ref stats } => write!(f, "store heartbeat stats: {:?}", stats),
             Task::ReportSplit { ref left, ref right } => {
                 write!(f, "report split left {:?}, right {:?}", left, right)
+            }
+            Task::GetRegion { ref region, ref peer } => {
+                write!(f, "get region {:?} peer {:?}", region, peer)
             }
         }
     }
@@ -176,6 +184,44 @@ impl<T: PdClient> Runner<T> {
             error!("report split failed {:?}", e);
         }
     }
+
+    fn handle_get_region(&self, local_region: metapb::Region, peer: metapb::Peer) {
+        metric_incr!("pd.get_region");
+        match self.pd_client.get_region(local_region.get_start_key()) {
+            Ok(mut pd_region) => {
+                metric_incr!("pd.get_region");
+                if local_region == local_region {
+                    // Local region info is as fresh as pd, which means
+                    // local peer is still in the region, let it be there.
+                    return;
+                }
+                if !(local_region.get_start_key() == pd_region.get_start_key()) {
+                    // The region [start_key, ...) is missing in pd currently. It's probably
+                    // that a pending region split is happenning right now and that region
+                    // doesn't report it's heartbeat(with updated region info) yet.
+                    // We should sit tight and try another get_region task later.
+                    return;
+                }
+                let valid = pd_region.get_peers().into_iter().any(|p| p.to_owned() == peer);
+                if !valid {
+                    // Peer is not a member of this region anymore. Probably it's removed out.
+                    // Send it a raft massage to destroy it since it's obsolete.
+                    let mut message = RaftMessage::new();
+                    message.set_region_id(local_region.get_id());
+                    message.set_from_peer(peer.clone());
+                    message.set_to_peer(peer.clone());
+                    message.set_region_epoch(pd_region.take_region_epoch());
+                    message.set_is_tombstone(true);
+                    if let Err(e) = self.ch.send(Msg::RaftMessage(message)) {
+                        error!("send gc peer request to region {} err {:?}",
+                               local_region.get_id(),
+                               e)
+                    }
+                }
+            }
+            Err(e) => error!("get region failed {:?}", e),
+        }
+    }
 }
 
 impl<T: PdClient> Runnable<Task> for Runner<T> {
@@ -191,6 +237,7 @@ impl<T: PdClient> Runnable<Task> for Runner<T> {
             }
             Task::StoreHeartbeat { stats } => self.handle_store_heartbeat(stats),
             Task::ReportSplit { left, right } => self.handle_report_split(left, right),
+            Task::GetRegion { region, peer } => self.handle_get_region(region, peer),
         };
     }
 }
