@@ -127,6 +127,7 @@ fn execute_callback(callback: StorageCb, pr: ProcessResult) {
     }
 }
 
+/// Context for a running command.
 pub struct RunningCtx {
     cid: u64,
     cmd: Option<Command>,
@@ -159,6 +160,15 @@ fn make_engine_cb(cid: u64, pr: ProcessResult, ch: SendCh<Msg>) -> EngineCallbac
     })
 }
 
+/// Scheduler for commands.
+///
+/// This scheduler keeps track of all running commands and does the scheduling
+/// to ensure transaction semantics. Clients of the storage module talk to this
+/// scheduler, which in turn talks to the underlying storage engine.
+///
+/// There is one scheduler for each store. The scheduler runns in a single-thread
+/// event loop, but dispatches the actual command processing to a worker thread
+/// pool.
 pub struct Scheduler {
     engine: Box<Engine>,
 
@@ -195,6 +205,8 @@ impl Scheduler {
     }
 }
 
+/// Processes a read-only command within a worker thread which happens after
+/// the scheduling.
 fn process_read(cid: u64, mut cmd: Command, ch: SendCh<Msg>, snapshot: Box<Snapshot>) {
     debug!("process read cmd(cid={}) in worker pool.", cid);
     let pr = match cmd {
@@ -311,6 +323,8 @@ fn process_read(cid: u64, mut cmd: Command, ch: SendCh<Msg>, snapshot: Box<Snaps
     }
 }
 
+/// Process a write command within a worker thread which happens after the
+/// scheduling.
 fn process_write(cid: u64, cmd: Command, ch: SendCh<Msg>, snapshot: Box<Snapshot>) {
     if let Err(e) = process_write_impl(cid, cmd, ch.clone(), snapshot.as_ref()) {
         if let Err(err) = ch.send(Msg::WritePrepareFailed { cid: cid, err: e }) {
@@ -399,6 +413,7 @@ fn process_write_impl(cid: u64,
     Ok(())
 }
 
+/// Extracts the context of a command.
 fn extract_ctx(cmd: &Command) -> &Context {
     match *cmd {
         Command::Get { ref ctx, .. } |
@@ -417,11 +432,13 @@ fn extract_ctx(cmd: &Command) -> &Context {
 }
 
 impl Scheduler {
+    /// Generates the next command ID.
     fn gen_id(&mut self) -> u64 {
         self.id_alloc += 1;
         self.id_alloc
     }
 
+    /// Generates lock for a command.
     fn gen_lock(&self, cmd: &Command) -> Lock {
         match *cmd {
             Command::Prewrite { ref mutations, .. } => {
@@ -437,6 +454,7 @@ impl Scheduler {
         }
     }
 
+    /// Delivers a command to a worker thread for processing.
     fn process_by_worker(&mut self, cid: u64, snapshot: Box<Snapshot>) {
         debug!("process cmd with snapshot, cid={}", cid);
         let cmd = {
@@ -485,6 +503,7 @@ impl Scheduler {
         self.register_report_tick(event_loop);
     }
 
+    /// Event handler for new command.
     fn on_receive_new_cmd(&mut self, cmd: Command, callback: StorageCb) {
         let cid = self.gen_id();
         debug!("received new command, cid={}, cmd={}", cid, cmd);

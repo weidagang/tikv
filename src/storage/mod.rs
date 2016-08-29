@@ -11,6 +11,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Storage module.
+
 use std::thread;
 use std::boxed::FnBox;
 use std::fmt::{self, Debug, Display, Formatter};
@@ -35,11 +37,23 @@ pub use self::types::{Key, Value, KvPair, make_key};
 pub type Callback<T> = Box<FnBox(Result<T>) + Send>;
 
 pub type CfName = &'static str;
+
+/// The "default" column family which stores commited value.
 pub const CF_DEFAULT: CfName = "default";
+
+/// The "lock" column family which stores the location of primary lock for an
+/// uncommitted transaction.
 pub const CF_LOCK: CfName = "lock";
+
+/// The "write" column family which stores uncommitted data.
 pub const CF_WRITE: CfName = "write";
+
 pub const DEFAULT_CFS: &'static [CfName] = &[CF_DEFAULT, CF_LOCK, CF_WRITE];
 
+/// Low-level key-value mutation to the underlying storage engine.
+///
+/// Higher-level write commands will be mapped to these mutations. Timestamp
+/// is embeded in the key, hence transparent to this layer,
 #[derive(Debug, Clone)]
 pub enum Mutation {
     Put((Key, Value)),
@@ -49,6 +63,7 @@ pub enum Mutation {
 
 #[allow(match_same_arms)]
 impl Mutation {
+    /// Gets the key of this mutation.
     pub fn key(&self) -> &Key {
         match *self {
             Mutation::Put((ref key, _)) => key,
@@ -60,6 +75,7 @@ impl Mutation {
 
 use kvproto::kvrpcpb::Context;
 
+/// Callback for receiving execution result of a command from the storage engine.
 pub enum StorageCb {
     Boolean(Callback<()>),
     Booleans(Callback<Vec<Result<()>>>),
@@ -68,35 +84,72 @@ pub enum StorageCb {
     Locks(Callback<Vec<LockInfo>>),
 }
 
+/// Higher-level commands which present the abstraction of timestamped key.
+///
+/// Multiple commands are involved in a write transaction.
 pub enum Command {
+    /// Gets the row by `key` with maximum timestamp no greater than `start_ts`.
     Get {
         ctx: Context,
         key: Key,
         start_ts: u64,
     },
+
+    /// Gets the rows by `keys`, each with maximum timestamp no greater than `start_ts`.
     BatchGet {
         ctx: Context,
         keys: Vec<Key>,
         start_ts: u64,
     },
+
+    /// Scans rows from `start_key`, returns up to `limit` results, each with
+    /// maximum timestamp no greater than `start_ts`.
     Scan {
         ctx: Context,
         start_key: Key,
         limit: usize,
         start_ts: u64,
     },
+
+    /// Prewrites a transaction at `start_ts`, which essentially locks all the
+    /// rows in the transaction.
+    ///
+    /// A prewrite contains a list of `mutations`, which will be buffered in the
+    /// "write" family column of the rows before commit.
+    ///
+    /// One of the rows in the mutations is selected as the `primary`, who's
+    /// "lock" column family is used to keep track of the transaction state; the
+    /// "lock" column family of other rows will have a reference to the primary.
+    ///
+    /// If the mutation to the primary row is committed, then all the mutations
+    /// are committed, otherwise if it is aborted, all the mutations are aborted.
+    /// This is the technique to ensure the atomicity property of a transaction.
+    /// If a client fails half way through in a transaction, a subsequent
+    /// conflicting transaction will help it either roll back or roll forward,
+    /// depending on the state recorded in the transaction's primary record.
+    ///
+    /// Prewrite may fail if conflicting transactions are detected.
     Prewrite {
         ctx: Context,
         mutations: Vec<Mutation>,
         primary: Vec<u8>,
         start_ts: u64,
     },
+
+    /// Commits a transaction at `commit_ts` whose prewrite has done at `lock_ts`.
+    ///
+    /// The transaction state is atomically tracked by the "lock" family column
+    /// of the primary row at `lock_ts`. Committing a transaction is essentially
+    /// releasing the lock and applying the mutations buffered in the "write"
+    /// family column at `lock_ts` to the "default" column family at `commit_ts`.
     Commit {
         ctx: Context,
         keys: Vec<Key>,
         lock_ts: u64,
         commit_ts: u64,
     },
+
+    /// Commits and gets.
     CommitThenGet {
         ctx: Context,
         key: Key,
@@ -104,27 +157,36 @@ pub enum Command {
         commit_ts: u64,
         get_ts: u64,
     },
+
     Cleanup {
         ctx: Context,
         key: Key,
         start_ts: u64,
     },
+
+
     Rollback {
         ctx: Context,
         keys: Vec<Key>,
         start_ts: u64,
     },
+
+
     RollbackThenGet {
         ctx: Context,
         key: Key,
         lock_ts: u64,
     },
+
+    /// Scans locks with maximum timestamp `max_ts`.
     ScanLock { ctx: Context, max_ts: u64 },
+
     ResolveLock {
         ctx: Context,
         start_ts: u64,
         commit_ts: Option<u64>,
     },
+
     Gc {
         ctx: Context,
         safe_point: u64,
@@ -133,6 +195,7 @@ pub enum Command {
     },
 }
 
+/// Display for Command.
 impl Display for Command {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match *self {
@@ -193,12 +256,14 @@ impl Display for Command {
     }
 }
 
+/// Debug for Command.
 impl Debug for Command {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "{}", self)
     }
 }
 
+/// Returns `true` if this command is read-only, `false` otherwise.
 impl Command {
     pub fn readonly(&self) -> bool {
         match *self {

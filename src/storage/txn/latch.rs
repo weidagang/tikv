@@ -16,6 +16,10 @@ use std::collections::VecDeque;
 use std::hash::{Hash, SipHasher, Hasher};
 use std::usize;
 
+/// Latch which is used to serialize concurrent accesses to a resource.
+///
+/// A latch is a waiting queue indexed by a slot ID. The keys of a command is hashed to slot IDs,
+/// then the command is enqueued to corresponding latches.
 #[derive(Clone)]
 struct Latch {
     // store waiting commands
@@ -23,18 +27,24 @@ struct Latch {
 }
 
 impl Latch {
+    /// Creates a latch with empty waiting queue.
     pub fn new() -> Latch {
         Latch { waiting: VecDeque::new() }
     }
 }
 
+/// Lock required for a command.
 #[derive(Clone)]
 pub struct Lock {
+    /// The slot IDs of the latches that a command must acquire before eing able to be processed.
     pub required_slots: Vec<usize>,
+
+    /// The number of latches that the command has acquired.
     pub owned_count: usize,
 }
 
 impl Lock {
+    /// Creates a lock.
     pub fn new(required_slots: Vec<usize>) -> Lock {
         Lock {
             required_slots: required_slots,
@@ -42,17 +52,25 @@ impl Lock {
         }
     }
 
+    /// Returns true if all the required latches have be acquired, false otherwise.
     pub fn acquired(&self) -> bool {
         self.required_slots.len() == self.owned_count
     }
 }
 
+/// Latches which are used for concurrency control in the scheduler.
+///
+/// Each latch is index by a slot ID, hence sometimes latch and slot are used interchangably, but
+/// conceptually a latch is a queue, and a slot is an index to a latch.
 pub struct Latches {
     slots: Vec<Latch>,
     size: usize,
 }
 
 impl Latches {
+    /// Creates latches.
+    ///
+    /// The size will be rounded up to the power of 2.
     pub fn new(size: usize) -> Latches {
         let power_of_two_size = usize::next_power_of_two(size);
         Latches {
@@ -61,6 +79,7 @@ impl Latches {
         }
     }
 
+    /// Creates a lock which specifies all the required latches for a command.
     pub fn gen_lock<H>(&self, keys: &[H]) -> Lock
         where H: Hash
     {
@@ -71,6 +90,11 @@ impl Latches {
         Lock::new(slots)
     }
 
+    /// Tries to acquire the latches specified by the `lock` for command with ID `who`.
+    ///
+    /// This method will enqueue the command ID into the waiting queues of the latches. A latch is
+    /// considered acquired if the command ID is at the front of the queue. Returns true if all the
+    /// Latches are acquired, false otherwise.
     pub fn acquire(&mut self, lock: &mut Lock, who: u64) -> bool {
         let mut acquired_count: usize = 0;
         for i in &lock.required_slots[lock.owned_count..] {
@@ -97,7 +121,9 @@ impl Latches {
         lock.acquired()
     }
 
-    // release all latches owned, and return wakeup list
+    /// Releases all latches owned by the `lock` of command with ID `who`, returns the wakeup list.
+    ///
+    /// Preconditions: the caller must ensure the command is at the front of the latches.
     pub fn release(&mut self, lock: &Lock, who: u64) -> Vec<u64> {
         let mut wakeup_list: Vec<u64> = vec![];
         for i in &lock.required_slots[..lock.owned_count] {
@@ -112,6 +138,7 @@ impl Latches {
         wakeup_list
     }
 
+    /// Calculates the slot ID by hashing the `key`.
     fn calc_slot<H>(&self, key: &H) -> usize
         where H: Hash
     {
