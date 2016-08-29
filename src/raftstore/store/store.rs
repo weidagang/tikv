@@ -106,10 +106,9 @@ impl<T: Transport, C: PdClient> Store<T, C> {
         try!(cfg.validate());
 
         let sendch = SendCh::new(sender);
-
         let peer_cache = HashMap::new();
 
-        Ok(Store {
+        let mut s = Store {
             cfg: cfg,
             store: meta,
             engine: engine,
@@ -126,12 +125,15 @@ impl<T: Transport, C: PdClient> Store<T, C> {
             pd_client: pd_client,
             peer_cache: Arc::new(RwLock::new(peer_cache)),
             snap_mgr: mgr,
-        })
+        };
+        try!(s.init());
+        Ok(s)
     }
 
-    // Do something before store runs.
-    // TODO: should not accept request before prepare is finished.
-    fn prepare(&mut self) -> Result<()> {
+    /// Initialize this store. It scans the db engine, loads all regions
+    /// and their peers from it, and schedules snapshot worker if neccessary.
+    /// WARN: This store should not be used before initialized.
+    fn init(&mut self) -> Result<()> {
         // Scan region meta to get saved regions.
         let start_key = keys::REGION_META_MIN_KEY;
         let end_key = keys::REGION_META_MAX_KEY;
@@ -188,8 +190,6 @@ impl<T: Transport, C: PdClient> Store<T, C> {
     }
 
     pub fn run(&mut self, event_loop: &mut EventLoop<Self>) -> Result<()> {
-        try!(self.prepare());
-
         try!(self.snap_mgr.wl().init());
 
         self.register_raft_base_tick(event_loop);
@@ -767,6 +767,13 @@ impl<T: Transport, C: PdClient> Store<T, C> {
                 uuid
             }
         };
+
+        let store_id = msg.get_header().get_peer().get_store_id();
+        if store_id != self.store.get_id() {
+            bind_error(&mut resp,
+                       box_err!("mismatch store id {} != {}", store_id, self.store.get_id()));
+            return cb.call_box((resp,));
+        }
 
         if msg.has_status_request() {
             // For status commands, we handle it here directly.
