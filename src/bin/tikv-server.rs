@@ -250,9 +250,10 @@ fn get_rocksdb_default_cf_option(matches: &Matches, config: &toml::Value) -> Roc
                                                        "rocksdb.max-background-compactions",
                                                        matches,
                                                        config,
-                                                       Some(4),
+                                                       Some(6),
                                                        |v| v.as_integer());
     opts.set_max_background_compactions(max_background_compactions as i32);
+    opts.set_max_background_flushes(2);
 
     let max_bytes_for_level_base = get_integer_value("",
                                                      "rocksdb.max-bytes-for-level-base",
@@ -321,7 +322,98 @@ fn get_rocksdb_lock_cf_option() -> RocksdbOptions {
 }
 
 fn get_rocksdb_write_cf_option(matches: &Matches, config: &toml::Value) -> RocksdbOptions {
-    get_rocksdb_default_cf_option(matches, config)
+    let mut opts = RocksdbOptions::new();
+    let mut block_base_opts = BlockBasedOptions::new();
+    block_base_opts.set_block_size(16 * 1024);
+
+    // set write cf's block_cache_size according to default cf's block_cache_size
+    let block_cache_size = get_integer_value("",
+                                             "rocksdb.block-based-table.block-cache-size",
+                                             matches,
+                                             config,
+                                             Some(1024 * 1024 * 1024),
+                                             |v| v.as_integer());
+    let write_cf_block_cache_size: u64 = block_cache_size as u64 / 4;
+    block_base_opts.set_lru_cache(write_cf_block_cache_size);
+    opts.set_block_based_table_factory(&block_base_opts);
+
+    let cpl = get_string_value("",
+                               "rocksdb.writecf.compression_per_level",
+                               matches,
+                               config,
+                               Some("lz4:lz4:lz4:lz4:lz4:lz4:lz4".to_owned()),
+                               |v| v.as_str().map(|s| s.to_owned()));
+    let per_level_compression = util::config::parse_rocksdb_per_level_compression(&cpl).unwrap();
+    opts.compression_per_level(&per_level_compression);
+
+    let write_buffer_size = get_integer_value("",
+                                              "rocksdb.writecf.write-buffer-size",
+                                              matches,
+                                              config,
+                                              Some(64 * 1024 * 1024),
+                                              |v| v.as_integer());
+    opts.set_write_buffer_size(write_buffer_size as u64);
+
+    let max_write_buffer_number = {
+        get_integer_value("",
+                          "rocksdb.writecf.max-write-buffer-number",
+                          matches,
+                          config,
+                          Some(5),
+                          |v| v.as_integer())
+    };
+    opts.set_max_write_buffer_number(max_write_buffer_number as i32);
+
+    let min_write_buffer_number_to_merge = {
+        get_integer_value("",
+                          "rocksdb.writecf.min-write-buffer-number-to-merge",
+                          matches,
+                          config,
+                          Some(1),
+                          |v| v.as_integer())
+    };
+    opts.set_min_write_buffer_number_to_merge(min_write_buffer_number_to_merge as i32);
+
+    let max_bytes_for_level_base = get_integer_value("",
+                                                     "rocksdb.writecf.max-bytes-for-level-base",
+                                                     matches,
+                                                     config,
+                                                     Some(64 * 1024 * 1024),
+                                                     |v| v.as_integer());
+    opts.set_max_bytes_for_level_base(max_bytes_for_level_base as u64);
+
+    let target_file_size_base = get_integer_value("",
+                                                  "rocksdb.writecf.target-file-size-base",
+                                                  matches,
+                                                  config,
+                                                  Some(16 * 1024 * 1024),
+                                                  |v| v.as_integer());
+    opts.set_target_file_size_base(target_file_size_base as u64);
+
+    opts
+}
+
+fn get_rocksdb_raftlog_cf_option() -> RocksdbOptions {
+    let mut opts = RocksdbOptions::new();
+    let mut block_base_opts = BlockBasedOptions::new();
+    block_base_opts.set_block_size(16 * 1024);
+    block_base_opts.set_lru_cache(256 * 1024 * 1024);
+    block_base_opts.set_bloom_filter(10, false);
+    opts.set_block_based_table_factory(&block_base_opts);
+
+    let cpl = "no:no:no:no:no:no:no".to_owned();
+    let per_level_compression = util::config::parse_rocksdb_per_level_compression(&cpl).unwrap();
+    opts.compression_per_level(&per_level_compression);
+    opts.set_write_buffer_size(32 * 1024 * 1024);
+    opts.set_max_write_buffer_number(5);
+    opts.set_max_bytes_for_level_base(128 * 1024 * 1024);
+    opts.set_target_file_size_base(8 * 1024 * 1024);
+
+    opts
+}
+
+fn get_rocksdb_binlog_cf_option() -> RocksdbOptions {
+    RocksdbOptions::new()
 }
 
 // TODO: merge this function with Config::new
@@ -489,7 +581,9 @@ fn build_raftkv(matches: &Matches,
     let opts = get_rocksdb_option(matches, config);
     let cfs_opts = vec![get_rocksdb_default_cf_option(matches, config),
                         get_rocksdb_lock_cf_option(),
-                        get_rocksdb_write_cf_option(matches, config)];
+                        get_rocksdb_write_cf_option(matches, config),
+                        get_rocksdb_raftlog_cf_option(),
+                        get_rocksdb_binlog_cf_option()];
     let mut db_path = path.clone();
     db_path.push("db");
     let engine = Arc::new(rocksdb_util::new_engine_opt(opts,

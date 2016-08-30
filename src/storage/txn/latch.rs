@@ -22,7 +22,7 @@ use std::usize;
 /// is added to the waiting queues of the latches.
 ///
 /// If command A is ahead of command B in one latch, it must be ahead of command B in all the
-/// overlapping latches. This is an invariant ensured by the scheduler.
+/// overlapping latches. This is an invariant ensured by the `gen_lock`, `acquire` and `release`.
 #[derive(Clone)]
 struct Latch {
     // store waiting commands
@@ -39,7 +39,7 @@ impl Latch {
 /// Lock required for a command.
 #[derive(Clone)]
 pub struct Lock {
-    /// The slot IDs of the latches that a command must acquire before eing able to be processed.
+    /// The slot IDs of the latches that a command must acquire before being able to be processed.
     pub required_slots: Vec<usize>,
 
     /// The number of latches that the command has acquired.
@@ -63,8 +63,8 @@ impl Lock {
 
 /// Latches which are used for concurrency control in the scheduler.
 ///
-/// Each latch is index by a slot ID, hence sometimes latch and slot are used interchangably, but
-/// conceptually a latch is a queue, and a slot is an index to a latch.
+/// Each latch is indexed by a slot ID, hence the term latch and slot are used interchangably, but
+/// conceptually a latch is a queue, and a slot is an index to the queue.
 pub struct Latches {
     slots: Vec<Latch>,
     size: usize,
