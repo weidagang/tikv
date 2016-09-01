@@ -48,7 +48,11 @@ pub const CF_LOCK: CfName = "lock";
 /// The "write" column family which stores uncommitted data.
 pub const CF_WRITE: CfName = "write";
 
-pub const DEFAULT_CFS: &'static [CfName] = &[CF_DEFAULT, CF_LOCK, CF_WRITE];
+pub const CF_RAFT: CfName = "raft";
+
+pub const CF_BINLOG: CfName = "binlog";
+
+pub const DEFAULT_CFS: &'static [CfName] = &[CF_DEFAULT, CF_LOCK, CF_WRITE, CF_RAFT, CF_BINLOG];
 
 /// Low-level key-value mutation to the underlying storage engine.
 ///
@@ -75,7 +79,7 @@ impl Mutation {
 
 use kvproto::kvrpcpb::Context;
 
-/// Callback for receiving execution result of a command from the storage engine.
+/// Callback which is used to receive the execution result of a command.
 pub enum StorageCb {
     Boolean(Callback<()>),
     Booleans(Callback<Vec<Result<()>>>),
@@ -84,9 +88,7 @@ pub enum StorageCb {
     Locks(Callback<Vec<LockInfo>>),
 }
 
-/// Higher-level commands which present the abstraction of timestamped key.
-///
-/// Multiple commands are involved in a write transaction.
+/// Commands which are higher level operations atop of the low-level key-value based operations.
 pub enum Command {
     /// Gets the row by `key` with maximum timestamp no greater than `start_ts`.
     Get {
